@@ -19,7 +19,6 @@ genai.configure(api_key=api_key)
 def search_food_db(query):
     """Real-world tool: Searches for localized Indian food data."""
     try:
-        # We add 'cooked' and 'average' to get better real-world estimates
         results = DDGS().text(f"{query} cooked indian food nutritional value protein calories 100g average", max_results=1)
         return results[0]['body'] if results else "No specific data found."
     except Exception as e:
@@ -27,66 +26,59 @@ def search_food_db(query):
 
 tools = [search_food_db]
 
-# --- 3. THE VISION CORE ---
-def analyze_multimodal(image, text_context, mode, user_profile):
+# --- 3. THE FLEXIBLE AGENT (TEXT OR VISION) ---
+def analyze_flexible(mode, user_profile, text_input=None, image_input=None):
     """
-    Combines Image + Text Context + User Profile into one prompt.
+    Handles Text-Only, Image-Only, or Both.
     """
     model = genai.GenerativeModel(model_name='gemini-1.5-flash-002', tools=tools)
     
-    if mode == "MENU":
-        prompt = f"""
-        ACT AS: Expert Sports Nutritionist for a student hostel.
-        USER PROFILE: {user_profile}
-        EXTRA CONTEXT FROM USER: "{text_context}"
-        
-        TASK:
-        1. Read the menu in the image.
-        2. Consider the user's extra notes (e.g., allergies, preferences).
-        3. Recommend the single best high-protein combination.
-        
-        OUTPUT FORMAT (Strict JSON):
-        {{
-            "best_combo": "Eat 2 bowls of Dal, skip the Aloo.",
-            "protein_estimate": 22,
-            "reasoning": "Based on your note about avoiding dairy, this is the best plant-based option..."
-        }}
-        """
-    else: # PLATE Analysis
-        prompt = f"""
-        ACT AS: AI Dietitian.
-        USER PROFILE: {user_profile}
-        EXTRA CONTEXT FROM USER: "{text_context}"
-        
-        TASK:
-        1. Analyze the food on the plate image.
-        2. Adjust portion estimates based on the user's text context (e.g., "I only ate half").
-        3. Calculate final macros.
-        
-        OUTPUT FORMAT (Strict JSON):
-        {{
-            "foods": [
-                {{"name": "Rice", "qty": "100g (Half portion)", "cals": 130, "prot": 2.5}},
-                {{"name": "Chicken Curry", "qty": "150g", "cals": 240, "prot": 25}}
-            ],
-            "total_cals": 370,
-            "total_prot": 27.5,
-            "feedback": "Good job adjusting for your actual intake."
-        }}
-        """
+    # Base System Prompt
+    base_prompt = f"""
+    ACT AS: Elite Sports Nutritionist.
+    USER PROFILE: {user_profile}
+    MODE: {mode}
     
-    # Retry logic
+    YOUR GOAL: 
+    1. Analyze the input (Image AND/OR Text).
+    2. Calculate macros (Protein, Carbs, Fats, Calories).
+    3. Give advice based on the specific goal (e.g., if 'Dirty Bulk', suggest high calorie foods).
+    
+    OUTPUT FORMAT (Strict JSON):
+    {{
+        "foods": [
+            {{"name": "Item Name", "qty": "estimated portion", "cals": 0, "prot": 0}}
+        ],
+        "total_cals": 0,
+        "total_prot": 0,
+        "advice": "Specific advice based on the goal..."
+    }}
+    """
+    
+    # Dynamic Content Construction
+    content = [base_prompt]
+    
+    if text_input:
+        content.append(f"USER NOTES: {text_input}")
+    
+    if image_input:
+        content.append(image_input)
+        
+    if not text_input and not image_input:
+        return "Error: Please provide at least text or an image."
+
+    # Call Gemini
     for attempt in range(2):
         try:
-            response = model.generate_content([prompt, image])
+            response = model.generate_content(content)
             return response.text
         except Exception:
             time.sleep(1)
             
-    return "Error: AI Service Busy. Please try again."
+    return "Error: AI Service Busy."
 
 # --- 4. THE UI (FRONTEND) ---
-st.set_page_config(page_title="HostelFit Pro", page_icon="🥗", layout="centered")
+st.set_page_config(page_title="HostelFit Pro", page_icon="💪", layout="centered")
 
 # Custom CSS
 st.markdown("""
@@ -96,74 +88,88 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Starter Message
-st.markdown('<p class="big-font">👋 Hi there! I\'m HostelFit Pro.</p>', unsafe_allow_html=True)
-st.write("I'm here to help you hit your protein goals, even in the hostel mess. Show me a menu or your plate, give me some context, and I'll do the math.")
-st.divider()
+st.title("💪 HostelFit Pro")
+st.caption("AI Nutritionist: Text-Only, Vision, or Both.")
 
-# Sidebar
+# --- SIDEBAR: ADVANCED GOALS ---
 with st.sidebar:
     st.header("👤 Athlete Profile")
-    weight = st.slider("Weight (kg)", 40, 100, 70)
-    goal = st.selectbox("Goal", ["Muscle Gain", "Fat Loss"])
-    profile_str = f"{weight}kg, {goal}"
-    st.success(f"Daily Target: {int(weight * 2)}g Protein")
-
-# Main Tabs
-tab1, tab2 = st.tabs(["📸 Scan Mess Menu", "🍽️ Track My Plate"])
-
-with tab1:
-    st.write("### 📝 What's on the menu?")
-    # Added Text Input
-    menu_text = st.text_area("Add notes (optional)", placeholder="e.g., 'I'm allergic to nuts' or 'I hate paneer'", key="menu_txt")
-    menu_img = st.file_uploader("Upload Menu Photo", type=['jpg', 'png', 'jpeg'], key="menu_img")
+    weight = st.slider("Weight (kg)", 40, 120, 70)
     
-    if menu_img and st.button("Analyze Options"):
-        # Basic validation
-        if not api_key: st.error("API Key missing."); st.stop()
+    # NEW: Expanded Goal List
+    goal_type = st.selectbox("Current Phase", [
+        "Lean Bulk (Minimizing Fat)",
+        "Dirty Bulk (Max Size/Strength)",
+        "Maintenance (Recomp)",
+        "Aggressive Cut (Fast Fat Loss)",
+        "Slow Cut (Muscle Preservation)"
+    ])
+    
+    st.divider()
+    
+    # Dynamic Target Calculation based on Goal
+    if "Bulk" in goal_type:
+        target_prot = int(weight * 2.2)
+        st.success(f"🔥 Target: {target_prot}g Protein (High)")
+    elif "Cut" in goal_type:
+        target_prot = int(weight * 2.5)
+        st.warning(f"✂️ Target: {target_prot}g Protein (Very High)")
+    else:
+        target_prot = int(weight * 1.8)
+        st.info(f"⚖️ Target: {target_prot}g Protein")
 
-        with st.spinner("🔍 Reading menu & thinking..."):
-            raw = analyze_multimodal(Image.open(menu_img), menu_text, "MENU", profile_str)
+# --- MAIN INTERFACE ---
+st.subheader("🍽️ Track Your Meal")
+
+# 1. TEXT INPUT (Always Visible)
+user_text = st.text_area("Describe your meal:", placeholder="Ex: I ate 6 egg whites and a bowl of oats...")
+
+# 2. IMAGE INPUT (Optional)
+with st.expander("📸 Add Photo (Optional)"):
+    user_image = st.file_uploader("Upload Plate/Menu", type=['jpg', 'png', 'jpeg'])
+
+if st.button("Calculate Macros"):
+    if not user_text and not user_image:
+        st.error("⚠️ Please write what you ate OR upload a photo.")
+    else:
+        with st.spinner("🤖 Analyzing food data..."):
+            
+            # Prepare Image if exists
+            img_data = Image.open(user_image) if user_image else None
+            
+            # Run Agent
+            profile_str = f"{weight}kg, Goal: {goal_type}"
+            raw = analyze_flexible("MEAL_TRACKING", profile_str, user_text, img_data)
+            
             try:
+                # Clean JSON
                 clean_json = raw.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_json)
                 
-                st.subheader("🏆 Winning Combo")
-                st.success(data['best_combo'])
-                st.metric("Est. Protein", f"{data['protein_estimate']}g")
-                st.write(f"**Why?** {data['reasoning']}")
-            except:
-                st.error("Could not read menu clearly. Try a better photo.")
-
-with tab2:
-    st.write("### 🥗 What did you eat?")
-    # Added Text Input
-    plate_text = st.text_area("Add notes (optional)", placeholder="e.g., 'I left half the rice' or 'Added extra ghee'", key="plate_txt")
-    plate_img = st.file_uploader("Upload Plate Photo", type=['jpg', 'png', 'jpeg'], key="plate_img")
-    
-    if plate_img and st.button("Calculate Macros"):
-        if not api_key: st.error("API Key missing."); st.stop()
-
-        with st.spinner("🤖 Scanning plate & adjusting for your notes..."):
-            raw = analyze_multimodal(Image.open(plate_img), plate_text, "PLATE", profile_str)
-            try:
-                clean_json = raw.replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean_json)
-                
-                # Dashboard
-                c1, c2 = st.columns(2)
+                # Visual Dashboard
+                c1, c2, c3 = st.columns(3)
                 c1.metric("Calories", data['total_cals'])
                 c2.metric("Protein", f"{data['total_prot']}g")
                 
-                # Chart
-                fig, ax = plt.subplots(figsize=(4,4))
-                labels = [x['name'] for x in data['foods']]
-                sizes = [x['cals'] for x in data['foods']]
-                ax.pie(sizes, labels=labels, autopct='%1.1f%%', colors=['#ff9999','#66b3ff','#99ff99'])
-                st.pyplot(fig)
+                # Goal Check Logic
+                if data['total_prot'] >= 30:
+                    c3.success("✅ High Protein")
+                else:
+                    c3.error("⚠️ Low Protein")
                 
-                st.write("**Detailed Breakdown:**")
+                # Chart
+                if data['total_cals'] > 0:
+                    fig, ax = plt.subplots(figsize=(4,4))
+                    labels = [x['name'] for x in data['foods']]
+                    sizes = [x['cals'] for x in data['foods']]
+                    ax.pie(sizes, labels=labels, autopct='%1.1f%%', colors=['#ff9999','#66b3ff','#99ff99'])
+                    st.pyplot(fig)
+                
+                st.write("### 📝 Breakdown")
                 st.table(data['foods'])
-                st.info(f"💡 {data['feedback']}")
-            except:
-                st.error("Oops! The AI got confused. Ensure food is clearly visible.")
+                
+                st.info(f"👨‍⚕️ **Coach's Advice for {goal_type.split('(')[0]}:**\n\n{data['advice']}")
+                
+            except Exception as e:
+                st.error("Could not analyze. Please try again.")
+                st.write(f"Debug: {raw}")
