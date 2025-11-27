@@ -31,7 +31,7 @@ def analyze_flexible(mode, user_profile, text_input=None, image_input=None):
     """
     Handles Text-Only, Image-Only, or Both.
     """
-    model = genai.GenerativeModel(model_name='gemini-1.5-flash-002', tools=tools)
+    model = genai.GenerativeModel(model_name='gemini-1.5-flash', tools=tools)
     
     # Base System Prompt
     base_prompt = f"""
