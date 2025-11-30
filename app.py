@@ -22,172 +22,201 @@ try:
     api_key = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=api_key)
 except FileNotFoundError:
-    st.error("🔑 API Key not found. Please set it in Streamlit Cloud Secrets or strictly locally.")
+    st.error("🔑 API Key not found. Please set it in Streamlit Cloud Secrets.")
     st.stop()
 
-# --- 2. MEMORY (SESSION STATE) ---
-# This satisfies the "Sessions & Memory" requirement
+# --- 2. ROBUST MODEL LOADER (Fixes 404 Error) ---
+def get_working_model(tools=None):
+    """
+    Tries multiple model names to find one that works.
+    Fixes the '404 Not Found' error by trying specific versions.
+    """
+    model_list = [
+        "gemini-1.5-flash-001",  # Most stable specific version
+        "gemini-1.5-flash",      # Generic alias
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",        # Fallback to Pro
+        "gemini-pro"             # Oldest fallback
+    ]
+    
+    for model_name in model_list:
+        try:
+            if tools:
+                return genai.GenerativeModel(model_name=model_name, tools=tools)
+            else:
+                return genai.GenerativeModel(model_name=model_name)
+        except Exception:
+            continue # Try next model
+            
+    # Default if all fail (will likely error later but returns an object)
+    return genai.GenerativeModel(model_name='gemini-1.5-flash')
+
+# --- 3. MEMORY (SESSION STATE) ---
 if "daily_log" not in st.session_state:
-    st.session_state.daily_log = [] # List to store meal history objects
+    st.session_state.daily_log = [] 
 if "daily_stats" not in st.session_state:
     st.session_state.daily_stats = {"cals": 0, "prot": 0, "carbs": 0, "fats": 0}
 
-# --- 3. TOOLS ---
-# This satisfies the "Tools" requirement
+# --- 4. TOOLS ---
 def search_food_db(query):
-    """Searches for localized Indian food data to help identify items."""
+    """Searches for localized Indian food data."""
     try:
-        results = DDGS().text(f"{query} cooked indian food nutritional value protein calories 100g average", max_results=1)
+        results = DDGS().text(f"{query} cooked indian food nutritional value protein calories 100g", max_results=1)
         return results[0]['body'] if results else "No specific data found."
     except Exception:
         return "Offline Mode: Using internal knowledge base."
 
 tools_list = [search_food_db]
 
-# --- 3. THE FLEXIBLE AGENT (TEXT OR VISION) ---
-def analyze_flexible(mode, user_profile, text_input=None, image_input=None):
+# --- 5. AGENTS (MULTI-AGENT SYSTEM) ---
+
+def agent_analyst(image_input, text_input):
     """
-    Handles Text-Only, Image-Only, or Both.
+    AGENT 1: The Analyst.
+    Role: Perception & Calculation.
     """
-    model = genai.GenerativeModel(model_name='gemini-2.5-flash', tools=tools)
+    # Use the robust loader to prevent 404s
+    model = get_working_model(tools=tools_list)
     
-    # Base System Prompt
-    base_prompt = f"""
+    base_prompt = """
+    Analyze the food input (Image and/or Text). 
+    Identify items, estimate portion sizes (in grams), and calculate macros.
+    
+    OUTPUT FORMAT: STRICT JSON ONLY. No markdown (```json).
+    Structure:
+    {
+        "foods": [
+            {"name": "Item Name", "qty": "estimated portion", "cals": 0, "prot": 0, "carbs": 0, "fats": 0}
+        ],
+        "meal_total_cals": 0,
+        "meal_total_prot": 0,
+        "meal_total_carbs": 0,
+        "meal_total_fats": 0,
+        "reasoning": "Briefly explain how you estimated this."
+    }
+    """
+    
+    content = [base_prompt]
+    if text_input: content.append(f"User Description: {text_input}")
+    if image_input: content.append(image_input)
+    
+    try:
+        response = model.generate_content(content)
+        # Clean the response text
+        raw_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(raw_text)
+    except Exception as e:
+        st.error(f"Agent Analyst failed. Please try again. Error: {e}")
+        return None
+
+def agent_coach(user_profile, current_meal, daily_history):
+    """
+    AGENT 2: The Coach.
+    Role: Strategy & Motivation.
+    """
+    model = get_working_model() # No tools needed
+    
+    prompt = f"""
     ACT AS: Elite Sports Nutritionist.
     USER PROFILE: {user_profile}
-    MODE: {mode}
+    CURRENT MEAL: {json.dumps(current_meal)}
+    DAILY HISTORY: {json.dumps(daily_history)}
     
-    YOUR GOAL: 
-    1. Analyze the input (Image AND/OR Text).
-    2. Calculate macros (Protein, Carbs, Fats, Calories).
-    3. Give advice based on the specific goal (e.g., if 'Dirty Bulk', suggest high calorie foods).
-    
-    OUTPUT FORMAT (Strict JSON):
-    {{
-        "foods": [
-            {{"name": "Item Name", "qty": "estimated portion", "cals": 0, "prot": 0}}
-        ],
-        "total_cals": 0,
-        "total_prot": 0,
-        "advice": "Specific advice based on the goal..."
-    }}
+    YOUR TASK:
+    1. Provide specific feedback on this meal relative to their goal.
+    2. Advise them on what to do for the rest of the day based on their totals.
+    3. Keep it short and motivating.
     """
     
-    # Dynamic Content Construction
-    content = [base_prompt]
-    
-    if text_input:
-        content.append(f"USER NOTES: {text_input}")
-    
-    if image_input:
-        content.append(image_input)
-        
-    if not text_input and not image_input:
-        return "Error: Please provide at least text or an image."
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception:
+        return "Coach is offline. Good job tracking!"
 
-    # Call Gemini
-    for attempt in range(2):
-        try:
-            response = model.generate_content(content)
-            return response.text
-        except Exception:
-            time.sleep(1)
-            
-    return "Error: AI Service Busy."
-
-# --- 4. THE UI (FRONTEND) ---
-st.set_page_config(page_title="HostelFit Pro", page_icon="💪", layout="centered")
-
-# Custom CSS
-st.markdown("""
-<style>
-    .stButton>button { width: 100%; border-radius: 20px; background-color: #FF4B4B; color: white; }
-    .big-font { font-size: 20px !important; font-weight: bold; color: #31333F; }
-</style>
-""", unsafe_allow_html=True)
-
+# --- 6. UI & WORKFLOW ---
 st.title("💪 HostelFit Pro")
-st.caption("AI Nutritionist: Text-Only, Vision, or Both.")
+st.caption("Multi-Agent Nutritionist: Vision • Memory • Strategy")
 
-# Sidebar: User Profile & Daily Tracker
+# Sidebar
 with st.sidebar:
     st.header("👤 Athlete Profile")
     weight = st.slider("Weight (kg)", 40, 120, 70)
-    
-    # NEW: Expanded Goal List
     goal_type = st.selectbox("Current Phase", [
-        "Lean Bulk (Minimizing Fat)",
-        "Dirty Bulk (Max Size/Strength)",
-        "Maintenance (Recomp)",
-        "Aggressive Cut (Fast Fat Loss)",
-        "Slow Cut (Muscle Preservation)"
+        "Lean Bulk (Minimizing Fat)", "Dirty Bulk (Max Size)", 
+        "Maintenance", "Aggressive Cut"
     ])
     
-    st.divider()
-    
-    # Dynamic Target Calculation based on Goal
+    # Target Logic
     if "Bulk" in goal_type:
-        target_prot = int(weight * 2.2)
-        st.success(f"🔥 Target: {target_prot}g Protein (High)")
+        target_prot = int(weight * 2.0)
+        target_cals = weight * 35
     elif "Cut" in goal_type:
-        target_prot = int(weight * 2.5)
-        st.warning(f"✂️ Target: {target_prot}g Protein (Very High)")
+        target_prot = int(weight * 2.4)
+        target_cals = weight * 24
     else:
         target_prot = int(weight * 1.8)
-        st.info(f"⚖️ Target: {target_prot}g Protein")
+        target_cals = weight * 30
+        
+    st.divider()
+    st.subheader("📅 Daily Tracker")
+    
+    # Progress
+    c_prog = min(st.session_state.daily_stats['cals'] / target_cals, 1.0)
+    p_prog = min(st.session_state.daily_stats['prot'] / target_prot, 1.0)
+    
+    st.progress(c_prog, text=f"Calories: {st.session_state.daily_stats['cals']} / {int(target_cals)}")
+    st.progress(p_prog, text=f"Protein: {st.session_state.daily_stats['prot']}g / {target_prot}g")
+    
+    if st.button("Reset Daily Log"):
+        st.session_state.daily_log = []
+        st.session_state.daily_stats = {"cals": 0, "prot": 0, "carbs": 0, "fats": 0}
+        st.rerun()
 
-# --- MAIN INTERFACE ---
+# Main Area
 st.subheader("🍽️ Track Your Meal")
+user_text = st.text_area("Describe your meal:", placeholder="Ex: 2 chapatis and dal...")
+user_image = st.file_uploader("Upload Plate Photo (Optional)", type=['jpg', 'png', 'jpeg'])
 
-# 1. TEXT INPUT (Always Visible)
-user_text = st.text_area("Describe your meal:", placeholder="Ex: I ate 6 egg whites and a bowl of oats...")
-
-# 2. IMAGE INPUT (Optional)
-with st.expander("📸 Add Photo (Optional)"):
-    user_image = st.file_uploader("Upload Plate/Menu", type=['jpg', 'png', 'jpeg'])
-
-if st.button("Calculate Macros"):
+if st.button("Analyze & Log Meal"):
     if not user_text and not user_image:
-        st.error("⚠️ Please write what you ate OR upload a photo.")
+        st.error("⚠️ Please provide text or an image.")
     else:
-        with st.spinner("🤖 Analyzing food data..."):
-            
-            # Prepare Image if exists
+        # Agent 1
+        with st.spinner("🤖 Analyst Agent is calculating macros..."):
             img_data = Image.open(user_image) if user_image else None
+            meal_data = agent_analyst(img_data, user_text)
             
-            # Run Agent
-            profile_str = f"{weight}kg, Goal: {goal_type}"
-            raw = analyze_flexible("MEAL_TRACKING", profile_str, user_text, img_data)
+        if meal_data:
+            # Update Memory
+            st.session_state.daily_log.append(meal_data)
+            st.session_state.daily_stats['cals'] += meal_data.get('meal_total_cals', 0)
+            st.session_state.daily_stats['prot'] += meal_data.get('meal_total_prot', 0)
+            st.session_state.daily_stats['carbs'] += meal_data.get('meal_total_carbs', 0)
+            st.session_state.daily_stats['fats'] += meal_data.get('meal_total_fats', 0)
             
-            try:
-                # Clean JSON
-                clean_json = raw.replace("```json", "").replace("```", "").strip()
-                data = json.loads(clean_json)
-                
-                # Visual Dashboard
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Calories", data['total_cals'])
-                c2.metric("Protein", f"{data['total_prot']}g")
-                
-                # Goal Check Logic
-                if data['total_prot'] >= 30:
-                    c3.success("✅ High Protein")
-                else:
-                    c3.error("⚠️ Low Protein")
-                
-                # Chart
-                if data['total_cals'] > 0:
-                    fig, ax = plt.subplots(figsize=(4,4))
-                    labels = [x['name'] for x in data['foods']]
-                    sizes = [x['cals'] for x in data['foods']]
-                    ax.pie(sizes, labels=labels, autopct='%1.1f%%', colors=['#ff9999','#66b3ff','#99ff99'])
-                    st.pyplot(fig)
-                
-                st.write("### 📝 Breakdown")
-                st.table(data['foods'])
-                
-                st.info(f"👨‍⚕️ **Coach's Advice for {goal_type.split('(')[0]}:**\n\n{data['advice']}")
-                
-            except Exception as e:
-                st.error("Could not analyze. Please try again.")
-                st.write(f"Debug: {raw}")
+            # Agent 2
+            with st.spinner("🧠 Coach Agent is strategizing..."):
+                profile_str = f"Weight: {weight}kg, Goal: {goal_type}"
+                advice = agent_coach(profile_str, meal_data, st.session_state.daily_stats)
+            
+            # Display
+            st.success("Meal Logged!")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Calories", meal_data.get('meal_total_cals', 0))
+            col2.metric("Protein", f"{meal_data.get('meal_total_prot', 0)}g")
+            col3.metric("Carbs", f"{meal_data.get('meal_total_carbs', 0)}g")
+            
+            st.table(meal_data.get('foods', []))
+            st.info(f"👨‍⚕️ **Coach's Advice:**\n\n{advice}")
+            
+            # Charts
+            if meal_data.get('meal_total_cals', 0) > 0:
+                macros = [
+                    meal_data.get('meal_total_prot', 0)*4, 
+                    meal_data.get('meal_total_carbs', 0)*4, 
+                    meal_data.get('meal_total_fats', 0)*9
+                ]
+                fig, ax = plt.subplots(figsize=(2, 2))
+                ax.pie(macros, labels=['Prot', 'Carb', 'Fat'], autopct='%1.1f%%', colors=['#66b3ff','#99ff99','#ff9999'])
+                st.pyplot(fig, use_container_width=False)
